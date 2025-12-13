@@ -6,12 +6,3 @@ altair
 openpyxl
 pillow
 requests
-=======
-streamlit==1.40.0
-pandas==2.1.0
-numpy==1.26.0
-altair==5.2.0
-openpyxl==3.1.5
-pillow==10.1.0
-requests==2.31.0
->>>>>>> e5b58e4 (Update logic recommender system dan perbaikan app)
