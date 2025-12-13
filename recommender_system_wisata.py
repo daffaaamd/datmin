@@ -70,9 +70,20 @@ plt.show()
 # Distribusi Fee / Harga Tiket
 # --------------------------------------------------------------------
 plt.figure(figsize=(8, 5))
-sns.histplot(data=df, x='fee', bins=20, kde=True)
-plt.title('Distribusi Fee / Harga Tiket Masuk')
-plt.xlabel('Fee')
+# Limit x-axis to 99th percentile to avoid one extreme outlier squashing the histogram
+try:
+    p99 = df['fee'].quantile(0.99)
+    sns.histplot(data=df[df['fee'] <= p99], x='fee', bins=20, kde=True)
+    outliers = int((df['fee'] > p99).sum())
+    plt.title('Distribusi Fee / Harga Tiket Masuk (dikepang sampai 99th percentile)')
+    if outliers > 0:
+        plt.xlabel(f'Fee (Rp) — {outliers} outlier dikecualikan, geser batas untuk menampilkan)')
+    else:
+        plt.xlabel('Fee')
+except Exception:
+    sns.histplot(data=df, x='fee', bins=20, kde=True)
+    plt.xlabel('Fee')
+
 plt.ylabel('Frekuensi')
 plt.tight_layout()
 plt.show()

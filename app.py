@@ -379,12 +379,21 @@ with st.sidebar:
     # Filter harga
     min_fee = int(df["fee"].min())
     max_fee_slider = int(df["fee"].max())
+    # Default cap at 99th percentile to avoid one huge outlier squashing the distribution
+    try:
+        default_cap = int(df["fee"].quantile(0.99))
+        if default_cap < min_fee:
+            default_cap = max_fee_slider
+    except Exception:
+        default_cap = max_fee_slider
+
     max_fee = st.slider(
         "Max harga tiket (IDR)",
         min_value=min_fee,
         max_value=max_fee_slider,
-        value=max_fee_slider,
-        step=1000
+        value=default_cap,
+        step=1000,
+        help="Default diset ke 99th percentile untuk menghindari outlier ekstrem; geser untuk memasukkan seluruh rentang."
     )
 
     st.markdown("---")
@@ -569,16 +578,25 @@ if page == "📊 Overview":
 
     st.markdown("---")
     st.subheader("Distribusi Harga Tiket")
+    # Show histogram but limit x-axis to the current max_fee so extreme highs don't squash the bars
     hist_fee = (
         alt.Chart(filtered_df)
         .mark_bar()
         .encode(
-            x=alt.X("fee:Q", bin=alt.Bin(maxbins=20), title="Harga tiket (IDR)"),
+            x=alt.X("fee:Q", bin=alt.Bin(maxbins=20), title="Harga tiket (IDR)", scale=alt.Scale(domain=[0, max_fee])),
             y=alt.Y("count():Q", title="Jumlah tempat"),
             tooltip=["count()"]
         )
     )
     st.altair_chart(hist_fee, use_container_width=True)
+
+    # Informasi: berapa data yang dikecualikan karena melebihi batas max_fee
+    try:
+        n_outliers = int((df["fee"] > max_fee).sum())
+        if n_outliers > 0:
+            st.caption(f"{n_outliers:,} tempat dikecualikan karena harga > Rp {max_fee:,} (outliers). Geser slider untuk menampilkannya.")
+    except Exception:
+        pass
 
     # Tambahkan chart tambahan: Donut chart kategori & boxplot harga per kategori
     rowc1, rowc2 = st.columns([1, 1])
