@@ -9,6 +9,7 @@ import altair as alt
 import hashlib
 import urllib.request
 from urllib.parse import urlparse, parse_qs
+from datetime import datetime
 
 # Import recommender system
 from recommender import get_similar_places
@@ -75,6 +76,31 @@ def load_data():
     # pastikan bekerja pada salinan untuk menghindari SettingWithCopyWarning
     df = df.copy()
 
+    # Bersihkan kolom string: trim, hapus zero-width / NBSP, dan jadikan kosong menjadi NaN
+    def _clean_string_val(v):
+        if pd.isna(v):
+            return v
+        if isinstance(v, str):
+            s = v.replace("\u00A0", " ")  # non-breaking space
+            s = s.replace("\u200B", "")   # zero-width space
+            s = s.strip()
+            if s == "":
+                return pd.NA
+            return s
+        return v
+
+    obj_cols = df.select_dtypes(include=["object"]).columns.tolist()
+    normalized_counts = {}
+    for c in obj_cols:
+        before_blank = int((df[c].astype(object).isna() | (df[c].astype(object).apply(lambda x: isinstance(x, str) and x.strip()==""))).sum())
+        df[c] = df[c].apply(_clean_string_val)
+        after_blank = int(df[c].isna().sum())
+        if after_blank < before_blank:
+            # unlikely, but keep track
+            normalized_counts[c] = (before_blank, after_blank)
+        elif after_blank > before_blank:
+            normalized_counts[c] = (before_blank, after_blank)
+
     # Pastikan kolom penting ada
     required_cols = ["place", "city", "category", "rating", "fee"]
     missing = [c for c in required_cols if c not in df.columns]
@@ -114,10 +140,15 @@ def load_data():
         try:
             # tulis kembali ke file dataset yang dipilih
             df.to_excel(file_path, index=False, engine="openpyxl")
-            # Simpan pesan notifikasi untuk ditampilkan oleh pemanggil
-            added_notice = f"Kolom 'lat' dan 'lon' ditambahkan ke {os.path.basename(file_path)} (kosong). Silakan isi jika ingin menampilkan peta titik."
+            # Note: don't announce lat/lon auto-added to avoid confusion for users
         except Exception:
             added_notice = "Gagal menyimpan dataset setelah menambahkan kolom lat/lon. Silakan tambahkan kolom secara manual."
+
+    # Jika ada normalisasi string yang mengubah banyak nilai menjadi kosong, tambahkan info-notice
+    if normalized_counts:
+        parts = [f"{k}: {v[0]} → {v[1]} kosong" for k, v in normalized_counts.items()]
+        note = "; ".join(parts)
+        added_notice = (added_notice + "\n" if added_notice else "") + f"Normalisasi teks dilakukan (trim & hapus karakter tersembunyi): {note}"
 
     # Label harga (buat grouping di chart)
     max_fee = df["fee"].max()
@@ -141,10 +172,10 @@ def load_data():
         labels=["< 3", "3 - 3.5", "3.5 - 4", "4 - 4.5", "4.5 - 5"]
     )
 
-    return df, added_notice
+    return df, added_notice, file_path
 
 
-df, added_notice = load_data()
+df, added_notice, dataset_file = load_data()
 
 # Tampilkan notifikasi (jangan panggil st.* dari dalam fungsi yang di-cache)
 if added_notice:
@@ -402,6 +433,58 @@ with st.sidebar:
         value=""
     )
 
+    # Dataset info + reload / clean actions
+    st.markdown("---")
+    try:
+        ds_name = os.path.basename(dataset_file)
+        mtime = os.path.getmtime(dataset_file)
+        mtime_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+        st.write(f"**Dataset:** {ds_name}")
+        st.write(f"**Terakhir diubah:** {mtime_str}")
+    except Exception:
+        ds_name = None
+
+    if st.button("🔄 Reload dataset (clear cache)"):
+        st.cache_data.clear()
+        st.experimental_rerun()
+
+    st.write("**Pembersihan dataset**")
+    confirm_save = st.checkbox("Saya yakin ingin menyimpan perubahan bersih ke file dataset")
+    if st.button("🧹 Clean & Save dataset"):
+        if not confirm_save:
+            st.warning("Centang kotak konfirmasi sebelum menyimpan perubahan ke file.")
+        else:
+            try:
+                tmp = pd.read_excel(dataset_file, engine="openpyxl")
+                # cleaning logic: trim, remove zero-width/NBSP, turn empty -> NaN
+                def _clean_string_val_local(v):
+                    if pd.isna(v):
+                        return v
+                    if isinstance(v, str):
+                        s = v.replace("\u00A0", " ")
+                        s = s.replace("\u200B", "")
+                        s = s.strip()
+                        if s == "":
+                            return pd.NA
+                        return s
+                    return v
+
+                before = tmp.isna().sum()
+                for c in tmp.select_dtypes(include=["object"]).columns:
+                    tmp[c] = tmp[c].apply(_clean_string_val_local)
+                after = tmp.isna().sum()
+                tmp.to_excel(dataset_file, index=False, engine="openpyxl")
+                diffs = []
+                for col in before.index:
+                    if after[col] != before[col]:
+                        diffs.append(f"{col}: {before[col]} → {after[col]}")
+                summary = "; ".join(diffs) if diffs else "Tidak ada perubahan (sudah bersih)."
+                st.success(f"Berhasil membersihkan dan menyimpan {ds_name}: {summary}")
+                st.cache_data.clear()
+                st.experimental_rerun()
+            except Exception as e:
+                st.error(f"Gagal menyimpan: {e}")
+
 
 # =========================
 # 4. FUNGSI FILTER
@@ -448,6 +531,20 @@ if filtered_df.empty:
 # =========================
 if page == "📊 Overview":
     st.subheader("📊 Gambaran Umum")
+
+    # Tampilkan ringkasan dataset (jumlah baris asli & total fee) untuk verifikasi cepat
+    raw_total = len(df)
+    displayed_total = len(filtered_df)
+    try:
+        total_fee_dataset = int(df['fee'].dropna().sum())
+    except Exception:
+        total_fee_dataset = None
+    try:
+        total_fee_displayed = int(filtered_df['fee'].dropna().sum())
+    except Exception:
+        total_fee_displayed = None
+
+    # (Summary values calculated but not displayed here by request)
 
     # Banner gambar umum dihapus (sesuai permintaan pengguna)
 
@@ -690,12 +787,13 @@ elif page == "🔍 Eksplor Data":
     ]
     display_cols = [c for c in display_cols if c in filtered_df.columns]
 
-    st.dataframe(filtered_df[display_cols].reset_index(drop=True))
+    # Untuk tampilan, ganti NaN/None dengan string kosong supaya tidak tampil sebagai 'None' atau 'nan'
+    st.dataframe(filtered_df[display_cols].fillna("").reset_index(drop=True))
 
     st.markdown("---")
 
     # Tombol download CSV
-    csv_bytes = filtered_df[display_cols].to_csv(index=False).encode("utf-8")
+    csv_bytes = filtered_df[display_cols].fillna("").to_csv(index=False).encode("utf-8")
     st.download_button(
         label="⬇️ Download data (CSV) sesuai filter",
         data=csv_bytes,
@@ -714,7 +812,7 @@ elif page == "🔍 Eksplor Data":
             .sort_values(["rating", "fee"], ascending=[False, True])
             .head(10)
         )
-        st.dataframe(top_rating[display_cols].reset_index(drop=True))
+        st.dataframe(top_rating[display_cols].fillna("").reset_index(drop=True))
 
     with col_b:
         st.subheader("Top 10 tempat paling murah (rating ≥ 4)")
@@ -723,7 +821,7 @@ elif page == "🔍 Eksplor Data":
             .sort_values(["fee", "rating"], ascending=[True, False])
             .head(10)
         )
-        st.dataframe(murah_bagus[display_cols].reset_index(drop=True))
+        st.dataframe(murah_bagus[display_cols].fillna("").reset_index(drop=True))
 
 # =========================
 # 7. HALAMAN PETA & DETAIL
@@ -982,6 +1080,89 @@ elif page == "🔎 Content":
 
     st.markdown("---")
     st.write()
+
+    # ---- Word Cloud ----
+    st.subheader("☁️ Word Cloud dari Teks")
+    text_cols = [c for c in ["deskripsi", "review", "place", "alamat"] if c in filtered_df.columns]
+    if not text_cols:
+        st.info("Tidak ada kolom teks (deskripsi/review/place/alamat) di dataset untuk membuat Word Cloud.")
+    else:
+        col_choice = st.selectbox("Pilih kolom teks", options=text_cols)
+        stopword_choice = st.checkbox("Gunakan stopwords bahasa Inggris default (hilangkan kata umum)", value=True)
+        stopword_id = st.checkbox("Gunakan stopwords bahasa Indonesia (tambahan)", value=False)
+        min_font = st.slider("Minimum font size", min_value=8, max_value=50, value=10)
+        max_words = st.slider("Jumlah kata maksimum", min_value=20, max_value=300, value=100)
+
+        if st.button("🔍 Buat Word Cloud"):
+            text = " ".join(filtered_df[col_choice].dropna().astype(str).tolist())
+            if not text.strip():
+                st.info("Tidak ada teks untuk kolom ini setelah filter.")
+            else:
+                # Try to use the wordcloud library; if missing, fall back to a bar chart of most common words
+                try:
+                    from wordcloud import WordCloud, STOPWORDS
+                    sw = set(STOPWORDS) if stopword_choice else set()
+                    if stopword_id:
+                        # small extra id stopwords list
+                        id_sw = {
+                            'dan','di','ke','yang','dari','untuk','pada','dengan','ada','ini','itu','sangat','di',
+                            'atau','sebagai','akan','lebih','dengan','saja','lagi','juga','karena','oleh'
+                        }
+                        sw = sw.union(id_sw)
+                    wc = WordCloud(width=800, height=400, background_color="white", stopwords=sw,
+                                   collocations=False, min_font_size=min_font, max_words=max_words)
+                    wc.generate(text)
+                    img = wc.to_image()
+                    st.image(img, use_container_width=True)
+                    # Offer download as PNG
+                    import io
+                    buf = io.BytesIO()
+                    img.save(buf, format="PNG")
+                    buf.seek(0)
+                    st.download_button("⬇️ Download Word Cloud (PNG)", data=buf, file_name="wordcloud.png", mime="image/png")
+                except Exception as e:
+                    # Fallback: build word frequency bar chart
+                    import re
+                    from collections import Counter
+
+                    st.warning("wordcloud tidak tersedia; menampilkan fallback berupa bar chart frekuensi kata. (Untuk WordCloud PNG, jalankan `pip install wordcloud`)")
+                    # basic preprocessing: lowercase, remove non-alphanumeric except whitespace
+                    txt = text.lower()
+                    txt = re.sub(r"[^\w\s]", " ", txt)
+                    txt = re.sub(r"\d+", " ", txt)
+                    tokens = [t for t in txt.split() if len(t) > 1]
+                    # assemble stopwords
+                    sw = set()
+                    try:
+                        from wordcloud import STOPWORDS as WC_STOP
+                        if stopword_choice:
+                            sw = set(WC_STOP)
+                    except Exception:
+                        if stopword_choice:
+                            # a small english stopword subset fallback
+                            sw = {"the","and","for","with","that","this","from","are","was","but","not","you","have"}
+                    if stopword_id:
+                        sw = sw.union({'dan','di','ke','yang','dari','untuk','pada','dengan','ada','ini','itu','sangat','saja','lagi','juga','karena','oleh'})
+
+                    filtered_tokens = [t for t in tokens if t not in sw]
+                    if not filtered_tokens:
+                        st.info("Setelah pembersihan/stopwords, tidak ada kata tersisa untuk divisualisasikan.")
+                    else:
+                        cnt = Counter(filtered_tokens)
+                        top = cnt.most_common(max_words)
+                        df_wc = pd.DataFrame(top, columns=["word","count"])
+                        # bar chart
+                        chart = (
+                            alt.Chart(df_wc.head(50)).mark_bar().encode(
+                                x=alt.X("count:Q", title="Frekuensi"),
+                                y=alt.Y("word:N", sort='-x', title="Kata"),
+                                tooltip=["word","count"]
+                            ).properties(height=400)
+                        )
+                        st.altair_chart(chart, use_container_width=True)
+                        st.dataframe(df_wc.reset_index(drop=True).head(200))
+                        csvb = df_wc.to_csv(index=False).encode('utf-8')
+                        st.download_button("⬇️ Download frekuensi kata (CSV)", data=csvb, file_name="word_freq.csv", mime="text/csv")
 elif page == "📈 Insights":
     st.subheader("📈 Insights & Heatmaps")
 
@@ -1233,6 +1414,9 @@ elif page == "💡 Personalized Picks":
         
         # Skor 2: Value for Money (inverse of price: lebih murah = lebih bagus)
         max_fee = rec_df['fee'].max()
+        # Guard: jika semua fee kosong atau max_fee tidak valid, gunakan 1 sebagai denom supaya tidak NaN/div0
+        if pd.isna(max_fee) or max_fee == 0:
+            max_fee = 1.0
         rec_df['score_value'] = 1 - (rec_df['fee'].fillna(max_fee) / max_fee)
         
         # Skor 3: Popularitas (berdasarkan jumlah review/ulasan jika ada)
@@ -1263,14 +1447,12 @@ elif page == "💡 Personalized Picks":
         
         for idx, (_, row) in enumerate(rec_df.head(3).iterrows()):
             with top_3_cols[idx]:
-                score_pct = int(row['combined_score'] * 100)
                 medal = ["🥇", "🥈", "🥉"][idx]
-                
+
                 with st.container(border=True):
                     st.markdown(f"### {medal} {row['place']}")
                     st.markdown(f"📍 {row['city']} • 🏷️ {row['category']}")
                     st.markdown(f"⭐ {row['rating']:.1f} | 💰 Rp {row['fee']:,.0f}")
-                    st.markdown(f"**Skor:** {score_pct}%")
         
         st.markdown("---")
         
@@ -1278,10 +1460,11 @@ elif page == "💡 Personalized Picks":
         st.markdown("**📋 Daftar Lengkap:**")
         
         display_cols = [c for c in ["place", "city", "category", "rating", "fee"] if c in rec_df.columns]
-        display_cols.append('combined_score')  # tambah skor
+        # Tampilkan daftar lengkap tanpa kolom skor (skor masih dihitung untuk Top-3)
         
         display_df = rec_df[display_cols].copy()
-        display_df['combined_score'] = (display_df['combined_score'] * 100).round(0).astype(int).astype(str) + '%'
+        # Safely format combined_score: replace NaN with 0 before converting to int
+        display_df = display_df.rename(columns={'combined_score': 'Skor (%)'})
         display_df = display_df.rename(columns={'combined_score': 'Skor (%)'})
         
         st.dataframe(
@@ -1304,8 +1487,7 @@ elif page == "💡 Personalized Picks":
             with col_info:
                 st.success(
                     f"**{row['place']}** · {row['city']} · {row['category']}\n\n"
-                    f"⭐ Rating: {row['rating']:.1f} | 💰 Tiket: Rp {row['fee']:,.0f} | "
-                    f"✨ Skor: {int(row['combined_score']*100)}%"
+                    f"⭐ Rating: {row['rating']:.1f} | 💰 Tiket: Rp {row['fee']:,.0f}"
                 )
 
 
