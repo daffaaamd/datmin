@@ -5,4 +5,3 @@ altair
 openpyxl
 pillow
 requests
-wordcloud
