@@ -5,3 +5,5 @@ altair
 openpyxl
 pillow
 requests
+wordcloud
+matplotlib
