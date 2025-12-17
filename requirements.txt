@@ -5,5 +5,5 @@ altair
 openpyxl
 pillow
 requests
+scikit-learn
 wordcloud
-matplotlib
